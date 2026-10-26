@@ -61,5 +61,5 @@ vercel        # ou importe o repositório no painel da Vercel
 ```
 
 - `public/index.html` é servido como estático.
-- `api/index.py` (FastAPI) roda como função Python; o `vercel.json` redireciona `/api/*` para ela e define `maxDuration: 120`.
+- `api/index.py` (FastAPI) roda como função Python. A Vercel detecta o FastAPI e encaminha para ele as rotas que não são estáticas, com o caminho original (não use `rewrites` para `/api/index`: o app passaria a receber esse caminho e responderia 404). O `vercel.json` só define `maxDuration: 120`.
 - Não é preciso configurar nenhuma variável de ambiente.
