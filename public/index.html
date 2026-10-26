@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallelization · Agente de Viagens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #151b23;
+    --panel-2: #1c2430;
+    --border: #2a3441;
+    --text: #e6edf3;
+    --muted: #8b98a8;
+    --single: #f0883e;
+    --single-soft: rgba(240, 136, 62, .15);
+    --par: #3fb9a0;
+    --par-soft: rgba(63, 185, 160, .15);
+    --synth: #a371f7;
+    --danger: #f85149;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 Inter, system-ui, sans-serif;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  .hidden { display: none !important; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+  /* ---------- Gate ---------- */
+  #gate { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+  .gate-card {
+    width: 100%; max-width: 440px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 16px; padding: 32px;
+  }
+  .gate-card h1 { margin: 0 0 4px; font-size: 22px; }
+  .gate-card p { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .field input, .field select {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; outline: none; min-width: 0;
+  }
+  .field input:focus, .field select:focus { border-color: var(--par); }
+  .btn {
+    border: 0; border-radius: 8px; padding: 11px 18px; font-weight: 600; cursor: pointer;
+    background: var(--par); color: #06281f;
+  }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); font-weight: 500; padding: 7px 12px; }
+  .error { color: var(--danger); font-size: 13px; min-height: 20px; margin-top: 8px; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 16px; }
+
+  /* ---------- App ---------- */
+  #app { max-width: 1320px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+  header h1 { margin: 0; font-size: 24px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 14px; max-width: 760px; }
+  .eyebrow { font-size: 12px; color: var(--par); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+
+  form#trip {
+    display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)) auto; gap: 12px; align-items: end;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px;
+  }
+  @media (max-width: 1000px) { form#trip { grid-template-columns: repeat(2, minmax(0, 1fr)); } form#trip .btn { grid-column: 1 / -1; } }
+
+  #verdict {
+    margin: 16px 0 0; padding: 14px 18px; border-radius: var(--radius); background: var(--par-soft);
+    border: 1px solid var(--par); font-weight: 500;
+  }
+  #verdict strong { color: var(--par); }
+
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  @media (max-width: 900px) { .columns { grid-template-columns: 1fr; } }
+
+  .col {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; display: flex; flex-direction: column; gap: 18px; min-width: 0;
+    border-top: 3px solid var(--accent);
+  }
+  .col.single { --accent: var(--single); --accent-soft: var(--single-soft); }
+  .col.parallel { --accent: var(--par); --accent-soft: var(--par-soft); }
+  .col-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .col-head h2 { margin: 0; font-size: 17px; }
+  .col-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .timer { font-size: 28px; color: var(--accent); white-space: nowrap; }
+  .status { font-size: 12px; color: var(--muted); text-align: right; }
+
+  /* Diagrama */
+  .diagram { background: var(--bg); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 0; }
+  .node {
+    border: 1px solid var(--border); background: var(--panel-2); border-radius: 8px; padding: 7px 12px;
+    font-size: 13px; text-align: center; display: flex; align-items: center; gap: 8px; justify-content: center;
+    transition: border-color .2s, background .2s, box-shadow .2s;
+  }
+  .node .t { font-size: 11px; color: var(--muted); }
+  .node.running { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .node.done { border-color: var(--accent); }
+  .node.done::before { content: "✓"; color: var(--accent); font-weight: 700; }
+  .node.synth.running, .node.synth.done { --accent: var(--synth); --accent-soft: rgba(163,113,247,.15); }
+  .node.running::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--accent);
+    border-top-color: transparent; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .node.root { font-weight: 600; }
+  .vline { width: 2px; height: 14px; background: var(--border); }
+  .chain { display: flex; flex-direction: column; align-items: center; }
+  .chain .node { width: 230px; }
+  .fan { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; position: relative; padding-top: 14px; }
+  .fan::before { content: ""; position: absolute; top: 0; left: 12.5%; right: 12.5%; height: 2px; background: var(--border); }
+  .hbar { height: 2px; background: var(--border); margin: 0 12.5%; }
+  .fan > div { display: flex; flex-direction: column; align-items: center; position: relative; }
+  .fan > div::before { content: ""; position: absolute; top: -14px; width: 2px; height: 14px; background: var(--border); }
+  .fan .node { width: 100%; flex-direction: column; gap: 2px; padding: 8px 4px; font-size: 12px; min-height: 58px; }
+  .fan .node.done::before, .fan .node.running::before { margin-bottom: 2px; }
+  .fan-wrap { width: 100%; }
+  .fan-wrap .ticks { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .fan-wrap .ticks span { justify-self: center; width: 2px; height: 14px; background: var(--border); }
+
+  /* Timeline */
+  .timeline-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+  .tl-row { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 10px; height: 26px; font-size: 12px; color: var(--muted); }
+  .tl-track { position: relative; height: 16px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+  .tl-bar { position: absolute; top: 0; bottom: 0; background: var(--accent); border-radius: 4px; min-width: 2px; opacity: .9; }
+  .tl-bar.synth { background: var(--synth); }
+  .tl-bar.running { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.18) 0 6px, transparent 6px 12px); animation: slide 1s linear infinite; background-size: 17px 17px; }
+  @keyframes slide { to { background-position: 17px 0; } }
+  .tl-axis { display: grid; grid-template-columns: 110px 1fr; gap: 10px; font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .tl-axis div { display: flex; justify-content: space-between; }
+
+  /* Resultados */
+  .plan { background: var(--bg); border-radius: 10px; padding: 4px 16px; font-size: 14px; min-height: 60px; overflow-wrap: anywhere; }
+  .plan.empty { color: var(--muted); display: grid; place-items: center; padding: 16px; font-size: 13px; }
+  .plan h1, .plan h2, .plan h3 { font-size: 15px; margin: 14px 0 6px; }
+  .plan ul { padding-left: 20px; }
+  .plan table { border-collapse: collapse; font-size: 13px; }
+  .plan td, .plan th { border: 1px solid var(--border); padding: 4px 8px; }
+  details { background: var(--bg); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+  details + details { margin-top: 6px; }
+  summary { cursor: pointer; color: var(--muted); }
+  details .plan { padding: 0; }
+  .col-error { color: var(--danger); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<!-- ============ Tela de desbloqueio ============ -->
+<section id="gate">
+  <form class="gate-card" id="gate-form">
+    <div class="eyebrow">Agentic Design Patterns</div>
+    <h1>Parallelization</h1>
+    <p>Para usar a demonstração, informe sua chave de API da OpenAI.</p>
+    <div class="field">
+      <label for="key">OpenAI API key</label>
+      <input id="key" type="password" placeholder="sk-..." autocomplete="off" required>
+    </div>
+    <div class="error" id="gate-error"></div>
+    <button class="btn" style="width:100%" id="gate-btn">Desbloquear</button>
+    <div class="note">A chave fica só nesta aba do navegador (sessionStorage) e é enviada a cada execução direto para a OpenAI. Ela não é armazenada no servidor.</div>
+  </form>
+</section>
+
+<!-- ============ App ============ -->
+<main id="app" class="hidden">
+  <header>
+    <div>
+      <div class="eyebrow">Agentic Design Patterns · Parallelization</div>
+      <h1>Agente de planejamento de viagens</h1>
+      <p>Mesmas 4 tarefas: voos, hotéis, eventos e restaurantes. À esquerda, um único agente faz uma tarefa depois da outra. À direita, 4 subagentes trabalham ao mesmo tempo e um planejador junta os resultados.</p>
+    </div>
+    <button class="btn ghost" id="logout">Trocar chave</button>
+  </header>
+
+  <form id="trip">
+    <div class="field"><label>Origem</label><input name="origin" value="São Paulo" required></div>
+    <div class="field"><label>Destino</label><input name="destination" value="Lisboa" required></div>
+    <div class="field"><label>Ida</label><input name="depart_date" type="date" required></div>
+    <div class="field"><label>Volta</label><input name="return_date" type="date" required></div>
+    <div class="field"><label>Interesses</label><input name="interests" value="comida local, música"></div>
+    <div class="field"><label>Modelo</label>
+      <select name="model">
+        <option>gpt-4.1-mini</option><option>gpt-4.1-nano</option><option>gpt-4o-mini</option>
+        <option>gpt-4.1</option><option>gpt-4o</option>
+      </select>
+    </div>
+    <button class="btn" id="run">Planejar e comparar</button>
+  </form>
+
+  <div id="verdict" class="hidden"></div>
+
+  <div class="columns" id="columns"></div>
+</main>
+
+<template id="col-tpl">
+  <section class="col">
+    <div class="col-head">
+      <div><h2 data-title></h2><p data-subtitle></p></div>
+      <div><div class="timer mono" data-timer>0.0s</div><div class="status" data-status>aguardando</div></div>
+    </div>
+    <div class="diagram" data-diagram></div>
+    <div>
+      <div class="timeline-title">Linha do tempo (mesma escala nos dois lados)</div>
+      <div data-timeline></div>
+      <div class="tl-axis"><span></span><div data-axis></div></div>
+    </div>
+    <div class="col-error" data-error></div>
+    <div>
+      <div class="timeline-title">Plano de viagem final</div>
+      <div class="plan empty" data-plan>O plano aparece aqui quando o agente terminar.</div>
+    </div>
+    <div data-details></div>
+  </section>
+</template>
+
+<script>
+const TASKS = [
+  { key: "voos", label: "Voos", icon: "✈️" },
+  { key: "hoteis", label: "Hotéis", icon: "🏨" },
+  { key: "eventos", label: "Eventos", icon: "🎭" },
+  { key: "restaurantes", label: "Restaurantes", icon: "🍽️" },
+];
+const SYNTH = { key: "sintese", label: "Síntese", icon: "🧭" };
+const STEPS = [...TASKS, SYNTH];
+
+const MODES = {
+  single: {
+    title: "Agente único",
+    subtitle: "1 agente generalista · tarefas em sequência",
+  },
+  parallel: {
+    title: "Parallelization",
+    subtitle: "4 subagentes especialistas em paralelo + planejador",
+  },
+};
+
+// ---------------- Chave ----------------
+const store = {
+  get() { try { return sessionStorage.getItem("openai_key"); } catch { return null; } },
+  set(v) { try { sessionStorage.setItem("openai_key", v); } catch {} },
+  clear() { try { sessionStorage.removeItem("openai_key"); } catch {} },
+};
+let apiKey = store.get();
+
+function showApp(show) {
+  document.getElementById("gate").classList.toggle("hidden", show);
+  document.getElementById("app").classList.toggle("hidden", !show);
+}
+
+document.getElementById("gate-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const key = document.getElementById("key").value.trim();
+  const btn = document.getElementById("gate-btn");
+  const err = document.getElementById("gate-error");
+  err.textContent = "";
+  btn.disabled = true; btn.textContent = "Validando...";
+  try {
+    const res = await fetch("/api/validate", { method: "POST", headers: { "X-OpenAI-Key": key } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || "Chave inválida.");
+    }
+    apiKey = key; store.set(key); showApp(true);
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "Desbloquear";
+  }
+});
+
+document.getElementById("logout").addEventListener("click", () => {
+  store.clear(); apiKey = null; document.getElementById("key").value = ""; showApp(false);
+});
+
+if (apiKey) showApp(true);
+
+// ---------------- Datas padrão ----------------
+(() => {
+  const d = (n) => { const x = new Date(); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
+  document.querySelector("[name=depart_date]").value = d(30);
+  document.querySelector("[name=return_date]").value = d(35);
+})();
+
+// ---------------- Colunas ----------------
+const cols = {};
+
+function buildColumn(mode) {
+  const el = document.getElementById("col-tpl").content.firstElementChild.cloneNode(true);
+  el.classList.add(mode);
+  el.querySelector("[data-title]").textContent = MODES[mode].title;
+  el.querySelector("[data-subtitle]").textContent = MODES[mode].subtitle;
+
+  const nodeHtml = (s, extra = "") =>
+    `<div class="node ${extra}" data-node="${s.key}"><span>${s.icon} ${s.label}</span><span class="t mono" data-node-t="${s.key}"></span></div>`;
+
+  const diagram = el.querySelector("[data-diagram]");
+  if (mode === "single") {
+    diagram.innerHTML = `
+      <div class="node root">🤖 Agente de Viagens</div>
+      <div class="chain">
+        ${TASKS.map((s) => `<div class="vline"></div>${nodeHtml(s)}`).join("")}
+        <div class="vline"></div>${nodeHtml(SYNTH, "synth")}
+      </div>`;
+  } else {
+    diagram.innerHTML = `
+      <div class="node root">🧑‍✈️ Coordenador</div>
+      <div class="vline"></div>
+      <div class="fan-wrap">
+        <div class="fan">${TASKS.map((s) => `<div>${nodeHtml(s)}</div>`).join("")}</div>
+        <div class="ticks">${TASKS.map(() => "<span></span>").join("")}</div>
+        <div class="hbar"></div>
+      </div>
+      <div class="vline"></div>
+      ${nodeHtml(SYNTH, "synth")}`;
+  }
+
+  el.querySelector("[data-timeline]").innerHTML = STEPS.map((s) => `
+    <div class="tl-row"><span>${s.icon} ${s.label}</span>
+      <div class="tl-track"><div class="tl-bar ${s.key === "sintese" ? "synth" : ""}" data-bar="${s.key}" style="display:none"></div></div>
+    </div>`).join("");
+
+  document.getElementById("columns").appendChild(el);
+  cols[mode] = { el, state: null };
+}
+buildColumn("single");
+buildColumn("parallel");
+
+const q = (mode, sel) => cols[mode].el.querySelector(sel);
+
+function resetColumn(mode) {
+  cols[mode].state = { t0: null, end: null, steps: {}, error: null };
+  const el = cols[mode].el;
+  el.querySelectorAll("[data-node]").forEach((n) => n.classList.remove("running", "done"));
+  el.querySelectorAll("[data-node-t]").forEach((n) => (n.textContent = ""));
+  el.querySelectorAll("[data-bar]").forEach((b) => { b.style.display = "none"; b.classList.remove("running"); });
+  q(mode, "[data-timer]").textContent = "0.0s";
+  q(mode, "[data-status]").textContent = "conectando...";
+  q(mode, "[data-error]").textContent = "";
+  const plan = q(mode, "[data-plan]");
+  plan.className = "plan empty"; plan.textContent = "O plano aparece aqui quando o agente terminar.";
+  q(mode, "[data-details]").innerHTML = "";
+}
+
+const md = (text) => DOMPurify.sanitize(marked.parse(text || ""));
+
+function handleEvent(mode, ev) {
+  const st = cols[mode].state;
+  const now = performance.now();
+  if (ev.type === "start") {
+    st.t0 = now;
+    q(mode, "[data-status]").textContent = "executando";
+  } else if (ev.type === "step_started") {
+    st.steps[ev.step] = { start: now, end: null };
+    q(mode, `[data-node="${ev.step}"]`)?.classList.add("running");
+    const step = STEPS.find((s) => s.key === ev.step);
+    if (step) q(mode, "[data-status]").textContent = `executando: ${step.label}`;
+  } else if (ev.type === "step_completed") {
+    const s = st.steps[ev.step];
+    if (!s) return;
+    s.end = now;
+    const node = q(mode, `[data-node="${ev.step}"]`);
+    node?.classList.replace("running", "done");
+    const t = q(mode, `[data-node-t="${ev.step}"]`);
+    if (t) t.textContent = `${((s.end - s.start) / 1000).toFixed(1)}s`;
+    if (ev.step === "sintese") {
+      const plan = q(mode, "[data-plan]");
+      plan.className = "plan"; plan.innerHTML = md(ev.content);
+    } else {
+      const step = TASKS.find((x) => x.key === ev.step);
+      const d = document.createElement("details");
+      d.innerHTML = `<summary>${step.icon} Resultado: ${step.label} (${((s.end - s.start) / 1000).toFixed(1)}s)</summary><div class="plan">${md(ev.content)}</div>`;
+      q(mode, "[data-details]").appendChild(d);
+    }
+  } else if (ev.type === "done") {
+    st.end = now;
+    q(mode, "[data-status]").textContent = "concluído";
+  } else if (ev.type === "error") {
+    st.end = now; st.error = ev.message;
+    q(mode, "[data-status]").textContent = "erro";
+    q(mode, "[data-error]").textContent = ev.message;
+    cols[mode].el.querySelectorAll(".node.running").forEach((n) => n.classList.remove("running"));
+  }
+}
+
+async function runMode(mode, payload) {
+  resetColumn(mode);
+  try {
+    const res = await fetch(`/api/run/${mode}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenAI-Key": apiKey },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const detail = Array.isArray(body.detail) ? body.detail.map((d) => d.msg).join("; ") : body.detail;
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const chunk = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+        const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+        if (line) handleEvent(mode, JSON.parse(line.slice(6)));
+      }
+    }
+    if (!cols[mode].state.end) handleEvent(mode, { type: "error", message: "A conexão foi encerrada antes do fim." });
+  } catch (ex) {
+    if (!cols[mode].state.t0) cols[mode].state.t0 = performance.now();
+    handleEvent(mode, { type: "error", message: ex.message });
+  }
+}
+
+// ---------------- Animação (timers + linha do tempo em escala comum) ----------------
+function elapsed(st, now) {
+  if (!st || !st.t0) return 0;
+  return ((st.end ?? now) - st.t0) / 1000;
+}
+
+function render() {
+  const now = performance.now();
+  const states = Object.values(cols).map((c) => c.state);
+  const maxElapsed = Math.max(0, ...states.map((s) => elapsed(s, now)));
+  const scale = Math.max(10, Math.ceil(maxElapsed * 1.1 / 5) * 5);
+
+  for (const mode of Object.keys(cols)) {
+    const st = cols[mode].state;
+    if (!st || !st.t0) continue;
+    q(mode, "[data-timer]").textContent = `${elapsed(st, now).toFixed(1)}s`;
+    for (const [key, s] of Object.entries(st.steps)) {
+      const bar = q(mode, `[data-bar="${key}"]`);
+      if (!bar) continue;
+      const start = (s.start - st.t0) / 1000;
+      const end = ((s.end ?? st.end ?? now) - st.t0) / 1000;
+      bar.style.display = "block";
+      bar.style.left = `${(start / scale) * 100}%`;
+      bar.style.width = `${((end - start) / scale) * 100}%`;
+      bar.classList.toggle("running", !s.end && !st.end);
+    }
+  }
+  document.querySelectorAll("[data-axis]").forEach((axis) => {
+    const ticks = 5;
+    axis.innerHTML = Array.from({ length: ticks + 1 }, (_, i) => `<span>${Math.round((scale / ticks) * i)}s</span>`).join("");
+  });
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ---------------- Execução ----------------
+document.getElementById("trip").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const payload = Object.fromEntries(new FormData(e.target).entries());
+  const btn = document.getElementById("run");
+  const verdict = document.getElementById("verdict");
+  btn.disabled = true; btn.textContent = "Executando...";
+  verdict.classList.add("hidden");
+
+  // Os dois lados começam ao mesmo tempo
+  await Promise.all([runMode("single", payload), runMode("parallel", payload)]);
+
+  const s = cols.single.state, p = cols.parallel.state;
+  if (!s.error && !p.error) {
+    const ts = elapsed(s), tp = elapsed(p);
+    verdict.innerHTML = `Plano completo com <strong>Parallelization em ${tp.toFixed(1)}s</strong> contra ${ts.toFixed(1)}s do agente único: <strong>${(ts / tp).toFixed(1)}× mais rápido</strong>. As tarefas são independentes, então rodar ao mesmo tempo elimina a espera de uma pela outra.`;
+    verdict.classList.remove("hidden");
+  }
+  btn.disabled = false; btn.textContent = "Planejar e comparar";
+});
+</script>
+</body>
+</html>
