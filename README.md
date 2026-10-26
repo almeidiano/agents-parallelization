@@ -30,12 +30,21 @@ Workflow(steps=[Parallel(voos, hoteis, eventos, restaurantes, name="pesquisas"),
 
 O backend transmite os eventos do Agno (`StepStarted` / `StepCompleted`) por SSE, e o front-end anima o diagrama e a linha do tempo em tempo real.
 
-## Chave da OpenAI
+## Provedores e chave de API
 
-A interface só é liberada depois que a pessoa informa uma chave da OpenAI, que é validada em `/api/validate`. A chave:
+A interface só é liberada depois que a pessoa escolhe o provedor e informa uma chave, que é validada em `/api/validate`:
+
+| Provedor | Chave | Modelos oferecidos |
+|---|---|---|
+| OpenAI | `sk-...` | gpt-4.1-mini, gpt-4.1-nano, gpt-4o-mini, gpt-4.1, gpt-4o |
+| [Groq](https://console.groq.com/keys) | `gsk_...` | openai/gpt-oss-120b, openai/gpt-oss-20b, llama-3.3-70b-versatile, llama-3.1-8b-instant |
+
+Os modelos ficam em `PROVIDERS` no `api/index.py`; a tela mostra só os que a chave tem acesso. No Agno, a troca de provedor é só a classe do modelo: `OpenAIChat` ou `Groq`.
+
+A chave:
 
 - fica apenas no `sessionStorage` da aba;
-- vai em cada requisição pelo header `X-OpenAI-Key`;
+- vai em cada requisição pelos headers `X-Provider` e `X-Api-Key`;
 - **nunca** é gravada no servidor (cada execução cria os agentes com a chave recebida).
 
 ## Rodar localmente

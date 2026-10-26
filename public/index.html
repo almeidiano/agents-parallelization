@@ -53,6 +53,12 @@
   }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); font-weight: 500; padding: 7px 12px; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 4px; margin-bottom: 16px; }
+  .seg button { border: 0; background: transparent; border-radius: 7px; padding: 8px; cursor: pointer; color: var(--muted); font-weight: 500; }
+  .seg button.active { background: var(--panel-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--par); }
+  .header-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  .badge { font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+  .badge b { color: var(--par); font-weight: 600; }
   .error { color: var(--danger); font-size: 13px; min-height: 20px; margin-top: 8px; }
   .note { font-size: 12px; color: var(--muted); margin-top: 16px; }
 
@@ -155,14 +161,18 @@
   <form class="gate-card" id="gate-form">
     <div class="eyebrow">Agentic Design Patterns</div>
     <h1>Parallelization</h1>
-    <p>Para usar a demonstração, informe sua chave de API da OpenAI.</p>
+    <p>Para usar a demonstração, escolha o provedor e informe sua chave de API.</p>
+    <div class="seg" id="provider-seg">
+      <button type="button" data-provider="openai" class="active">OpenAI</button>
+      <button type="button" data-provider="groq">Groq</button>
+    </div>
     <div class="field">
-      <label for="key">OpenAI API key</label>
+      <label for="key" id="key-label">OpenAI API key</label>
       <input id="key" type="password" placeholder="sk-..." autocomplete="off" required>
     </div>
     <div class="error" id="gate-error"></div>
     <button class="btn" style="width:100%" id="gate-btn">Desbloquear</button>
-    <div class="note">A chave fica só nesta aba do navegador (sessionStorage) e é enviada a cada execução direto para a OpenAI. Ela não é armazenada no servidor.</div>
+    <div class="note">A chave fica só nesta aba do navegador (sessionStorage) e é enviada a cada execução direto para o provedor escolhido. Ela não é armazenada no servidor.</div>
   </form>
 </section>
 
@@ -174,7 +184,10 @@
       <h1>Agente de planejamento de viagens</h1>
       <p>Mesmas 4 tarefas: voos, hotéis, eventos e restaurantes. À esquerda, um único agente faz uma tarefa depois da outra. À direita, 4 subagentes trabalham ao mesmo tempo e um planejador junta os resultados.</p>
     </div>
-    <button class="btn ghost" id="logout">Trocar chave</button>
+    <div class="header-actions">
+      <span class="badge">Provedor: <b id="provider-label"></b></span>
+      <button class="btn ghost" id="logout">Trocar chave</button>
+    </div>
   </header>
 
   <form id="trip">
@@ -184,10 +197,7 @@
     <div class="field"><label>Volta</label><input name="return_date" type="date" required></div>
     <div class="field"><label>Interesses</label><input name="interests" value="comida local, música"></div>
     <div class="field"><label>Modelo</label>
-      <select name="model">
-        <option>gpt-4.1-mini</option><option>gpt-4.1-nano</option><option>gpt-4o-mini</option>
-        <option>gpt-4.1</option><option>gpt-4o</option>
-      </select>
+      <select name="model" id="model"></select>
     </div>
     <button class="btn" id="run">Planejar e comparar</button>
   </form>
@@ -240,16 +250,37 @@ const MODES = {
 };
 
 // ---------------- Chave ----------------
-const store = {
-  get() { try { return sessionStorage.getItem("openai_key"); } catch { return null; } },
-  set(v) { try { sessionStorage.setItem("openai_key", v); } catch {} },
-  clear() { try { sessionStorage.removeItem("openai_key"); } catch {} },
+const PROVIDERS = {
+  openai: { label: "OpenAI", placeholder: "sk-..." },
+  groq: { label: "Groq", placeholder: "gsk_..." },
 };
-let apiKey = store.get();
+// { provider, label, key, models } — guardado só nesta aba
+const store = {
+  get() { try { return JSON.parse(sessionStorage.getItem("llm_credentials")); } catch { return null; } },
+  set(v) { try { sessionStorage.setItem("llm_credentials", JSON.stringify(v)); } catch {} },
+  clear() { try { sessionStorage.removeItem("llm_credentials"); } catch {} },
+};
+let creds = store.get();
+let gateProvider = "openai";
+
+const authHeaders = () => ({ "X-Provider": creds.provider, "X-Api-Key": creds.key });
+
+function selectProvider(provider) {
+  gateProvider = provider;
+  document.querySelectorAll("#provider-seg button").forEach((b) => b.classList.toggle("active", b.dataset.provider === provider));
+  document.getElementById("key-label").textContent = `${PROVIDERS[provider].label} API key`;
+  document.getElementById("key").placeholder = PROVIDERS[provider].placeholder;
+  document.getElementById("gate-error").textContent = "";
+}
+document.querySelectorAll("#provider-seg button").forEach((b) => b.addEventListener("click", () => selectProvider(b.dataset.provider)));
 
 function showApp(show) {
   document.getElementById("gate").classList.toggle("hidden", show);
   document.getElementById("app").classList.toggle("hidden", !show);
+  if (show) {
+    document.getElementById("provider-label").textContent = creds.label;
+    document.getElementById("model").innerHTML = creds.models.map((m) => `<option>${m}</option>`).join("");
+  }
 }
 
 document.getElementById("gate-form").addEventListener("submit", async (e) => {
@@ -260,12 +291,11 @@ document.getElementById("gate-form").addEventListener("submit", async (e) => {
   err.textContent = "";
   btn.disabled = true; btn.textContent = "Validando...";
   try {
-    const res = await fetch("/api/validate", { method: "POST", headers: { "X-OpenAI-Key": key } });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || "Chave inválida.");
-    }
-    apiKey = key; store.set(key); showApp(true);
+    const res = await fetch("/api/validate", { method: "POST", headers: { "X-Provider": gateProvider, "X-Api-Key": key } });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || "Chave inválida.");
+    creds = { provider: body.provider, label: body.label, key, models: body.models };
+    store.set(creds); showApp(true);
   } catch (ex) {
     err.textContent = ex.message;
   } finally {
@@ -274,10 +304,10 @@ document.getElementById("gate-form").addEventListener("submit", async (e) => {
 });
 
 document.getElementById("logout").addEventListener("click", () => {
-  store.clear(); apiKey = null; document.getElementById("key").value = ""; showApp(false);
+  store.clear(); creds = null; document.getElementById("key").value = ""; showApp(false);
 });
 
-if (apiKey) showApp(true);
+if (creds?.provider && creds?.key && creds?.models) showApp(true);
 
 // ---------------- Datas padrão ----------------
 (() => {
@@ -392,7 +422,7 @@ async function runMode(mode, payload) {
   try {
     const res = await fetch(`/api/run/${mode}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-OpenAI-Key": apiKey },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
