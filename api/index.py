@@ -6,8 +6,8 @@ Caso de uso: um agente que planeja viagens.
   - Parallelization: 4 subagentes especialistas executam as tarefas AO MESMO TEMPO
     (agno.workflow.Parallel) e um agente planejador junta tudo no final.
 
-A chave da OpenAI vem do navegador em cada requisição (header X-OpenAI-Key) e
-nunca é armazenada no servidor.
+Provedores suportados: OpenAI e Groq. A chave vem do navegador em cada requisição
+(headers X-Provider e X-Api-Key) e nunca é armazenada no servidor.
 """
 
 import asyncio
@@ -19,18 +19,33 @@ from datetime import date, timedelta
 from typing import AsyncIterator, Literal
 
 from agno.agent import Agent
+from agno.models.base import Model
+from agno.models.groq import Groq
 from agno.models.openai import OpenAIChat
 from agno.run.base import RunStatus
 from agno.workflow import Parallel, Step, Workflow
 from agno.workflow.types import StepInput, StepOutput
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI, AuthenticationError
+import groq
+import openai
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Parallelization demo")
 
-ALLOWED_MODELS = {"gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1", "gpt-4o"}
+# Modelos oferecidos por provedor (o primeiro é o padrão). Todos suportam tool calling.
+PROVIDERS = {
+    "openai": {
+        "label": "OpenAI",
+        "key_prefix": "sk-",
+        "models": ["gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1", "gpt-4o"],
+    },
+    "groq": {
+        "label": "Groq",
+        "key_prefix": "gsk_",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    },
+}
 
 # (chave do step, rótulo) — a ordem é a mesma nos dois modos
 TASKS = [
@@ -198,7 +213,7 @@ class TripRequest(BaseModel):
     depart_date: str = Field(max_length=10)
     return_date: str = Field(max_length=10)
     interests: str = Field(default="", max_length=200)
-    model: str = "gpt-4.1-mini"
+    model: str
 
 
 def task_prompts(trip: TripRequest) -> dict[str, str]:
@@ -214,11 +229,18 @@ def task_prompts(trip: TripRequest) -> dict[str, str]:
     }
 
 
-def model_for(trip: TripRequest, api_key: str) -> OpenAIChat:
-    return OpenAIChat(id=trip.model, api_key=api_key)
+class Credentials(BaseModel):
+    provider: Literal["openai", "groq"]
+    api_key: str
 
 
-def build_specialists(trip: TripRequest, api_key: str) -> dict[str, Agent]:
+def model_for(trip: TripRequest, creds: Credentials) -> Model:
+    if creds.provider == "groq":
+        return Groq(id=trip.model, api_key=creds.api_key)
+    return OpenAIChat(id=trip.model, api_key=creds.api_key)
+
+
+def build_specialists(trip: TripRequest, creds: Credentials) -> dict[str, Agent]:
     """Um subagente especialista por tarefa, cada um com só a sua ferramenta."""
     specs = {
         "voos": ("Agente de Voos", search_flights, "Você é especialista em passagens aéreas."),
@@ -229,7 +251,7 @@ def build_specialists(trip: TripRequest, api_key: str) -> dict[str, Agent]:
     return {
         key: Agent(
             name=name,
-            model=model_for(trip, api_key),
+            model=model_for(trip, creds),
             tools=[tool],
             instructions=[role, *COMMON],
             markdown=True,
@@ -239,11 +261,11 @@ def build_specialists(trip: TripRequest, api_key: str) -> dict[str, Agent]:
     }
 
 
-def build_generalist(trip: TripRequest, api_key: str) -> Agent:
+def build_generalist(trip: TripRequest, creds: Credentials) -> Agent:
     """Um único agente que sabe fazer tudo — mas só consegue fazer uma coisa por vez."""
     return Agent(
         name="Agente de Viagens",
-        model=model_for(trip, api_key),
+        model=model_for(trip, creds),
         tools=[search_flights, search_hotels, search_events, search_restaurants],
         instructions=["Você é um agente de viagens que pesquisa voos, hotéis, eventos e restaurantes.", *COMMON],
         markdown=True,
@@ -251,10 +273,10 @@ def build_generalist(trip: TripRequest, api_key: str) -> Agent:
     )
 
 
-def build_planner(trip: TripRequest, api_key: str) -> Agent:
+def build_planner(trip: TripRequest, creds: Credentials) -> Agent:
     return Agent(
         name="Agente Planejador",
-        model=model_for(trip, api_key),
+        model=model_for(trip, creds),
         instructions=[
             "Você monta o plano de viagem final a partir das pesquisas recebidas.",
             "Responda em português do Brasil, em markdown, com: resumo (voo + hotel escolhidos e custo estimado), "
@@ -305,23 +327,23 @@ def synthesis_step(planner: Agent, trip: TripRequest, parallel_name: str | None 
     return Step(name="sintese", executor=run, max_retries=0)
 
 
-def build_single_workflow(trip: TripRequest, api_key: str) -> Workflow:
+def build_single_workflow(trip: TripRequest, creds: Credentials) -> Workflow:
     """Agente isolado: as tarefas rodam em sequência, uma esperando a outra."""
-    agent = build_generalist(trip, api_key)
+    agent = build_generalist(trip, creds)
     prompts = task_prompts(trip)
     return Workflow(
         name="Agente único",
         steps=[
             *[agent_step(key, agent, prompts[key]) for key, _ in TASKS],
-            synthesis_step(build_planner(trip, api_key), trip),
+            synthesis_step(build_planner(trip, creds), trip),
         ],
         telemetry=False,
     )
 
 
-def build_parallel_workflow(trip: TripRequest, api_key: str) -> Workflow:
+def build_parallel_workflow(trip: TripRequest, creds: Credentials) -> Workflow:
     """Parallelization: os subagentes rodam ao mesmo tempo e o planejador agrega."""
-    specialists = build_specialists(trip, api_key)
+    specialists = build_specialists(trip, creds)
     prompts = task_prompts(trip)
     return Workflow(
         name="Parallelization",
@@ -330,7 +352,7 @@ def build_parallel_workflow(trip: TripRequest, api_key: str) -> Workflow:
                 *[agent_step(key, specialists[key], prompts[key]) for key, _ in TASKS],
                 name="pesquisas",
             ),
-            synthesis_step(build_planner(trip, api_key), trip, parallel_name="pesquisas"),
+            synthesis_step(build_planner(trip, creds), trip, parallel_name="pesquisas"),
         ],
         telemetry=False,
     )
@@ -341,10 +363,15 @@ def build_parallel_workflow(trip: TripRequest, api_key: str) -> Workflow:
 # ---------------------------------------------------------------------------
 
 
-def require_key(key: str | None) -> str:
-    if not key or not key.startswith("sk-"):
-        raise HTTPException(status_code=401, detail="Chave da OpenAI ausente ou inválida.")
-    return key
+def require_creds(provider: str | None, key: str | None) -> Credentials:
+    info = PROVIDERS.get(provider or "")
+    if not info:
+        raise HTTPException(status_code=400, detail="Provedor inválido.")
+    if not key or not key.startswith(info["key_prefix"]):
+        raise HTTPException(
+            status_code=401, detail=f"Chave da {info['label']} ausente ou inválida (deve começar com {info['key_prefix']})."
+        )
+    return Credentials(provider=provider, api_key=key)
 
 
 def sse(data: dict) -> str:
@@ -384,25 +411,34 @@ async def stream_workflow(workflow: Workflow, trip: TripRequest) -> AsyncIterato
 
 
 @app.post("/api/validate")
-async def validate(x_openai_key: str | None = Header(default=None)):
-    client = AsyncOpenAI(api_key=require_key(x_openai_key))
+async def validate(x_provider: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    """Confere a chave listando os modelos da conta; devolve os modelos da demo que ela pode usar."""
+    creds = require_creds(x_provider, x_api_key)
+    info = PROVIDERS[creds.provider]
+    client = groq.AsyncGroq if creds.provider == "groq" else openai.AsyncOpenAI
     try:
-        await client.models.list()
-    except AuthenticationError:
-        raise HTTPException(status_code=401, detail="A OpenAI recusou essa chave.")
+        available = {m.id for m in (await client(api_key=creds.api_key).models.list()).data}
+    except (openai.AuthenticationError, groq.AuthenticationError):
+        raise HTTPException(status_code=401, detail=f"A {info['label']} recusou essa chave.")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Não foi possível validar a chave: {exc}")
-    return {"ok": True}
+    models = [m for m in info["models"] if m in available] or info["models"]
+    return {"ok": True, "provider": creds.provider, "label": info["label"], "models": models}
 
 
 @app.post("/api/run/{mode}")
-async def run(mode: Literal["single", "parallel"], trip: TripRequest, x_openai_key: str | None = Header(default=None)):
-    api_key = require_key(x_openai_key)
-    if trip.model not in ALLOWED_MODELS:
+async def run(
+    mode: Literal["single", "parallel"],
+    trip: TripRequest,
+    x_provider: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+):
+    creds = require_creds(x_provider, x_api_key)
+    if trip.model not in PROVIDERS[creds.provider]["models"]:
         raise HTTPException(status_code=400, detail="Modelo não permitido.")
     builder = build_single_workflow if mode == "single" else build_parallel_workflow
     return StreamingResponse(
-        stream_workflow(builder(trip, api_key), trip),
+        stream_workflow(builder(trip, creds), trip),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
