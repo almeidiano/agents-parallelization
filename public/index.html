@@ -75,6 +75,12 @@
   }
   @media (max-width: 1000px) { form#trip { grid-template-columns: repeat(2, minmax(0, 1fr)); } form#trip .btn { grid-column: 1 / -1; } }
 
+  .sources { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+  .chip { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; }
+  .chip.real { border-color: var(--par); color: var(--text); }
+  .chip.real b { color: var(--par); }
+  .chip b { font-weight: 600; }
+
   #verdict {
     margin: 16px 0 0; padding: 14px 18px; border-radius: var(--radius); background: var(--par-soft);
     border: 1px solid var(--par); font-weight: 500;
@@ -202,6 +208,8 @@
     <button class="btn" id="run">Planejar e comparar</button>
   </form>
 
+  <div class="sources" id="sources"></div>
+
   <div id="verdict" class="hidden"></div>
 
   <div class="columns" id="columns"></div>
@@ -280,6 +288,24 @@ function showApp(show) {
   if (show) {
     document.getElementById("provider-label").textContent = creds.label;
     document.getElementById("model").innerHTML = creds.models.map((m) => `<option>${m}</option>`).join("");
+    loadSources();
+  }
+}
+
+// Fonte de dados de cada tarefa: API real (chave configurada no servidor) ou simulada
+async function loadSources() {
+  const el = document.getElementById("sources");
+  try {
+    const res = await fetch("/api/sources");
+    const sources = await res.json();
+    el.innerHTML = "<span>Fontes de dados:</span>" + TASKS.map((t) => {
+      const s = sources[t.key];
+      return s.real
+        ? `<span class="chip real">${t.icon} ${s.fonte} · <b>API real</b></span>`
+        : `<span class="chip" title="Configure a chave no servidor para usar ${s.fonte}">${t.icon} simulado</span>`;
+    }).join("");
+  } catch {
+    el.innerHTML = "";
   }
 }
 
