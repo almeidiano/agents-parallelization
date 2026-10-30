@@ -16,7 +16,20 @@ A tela principal roda as mesmas 4 tarefas lado a lado:
 
 Nos dois casos um **Agente Planejador** junta as pesquisas no plano final. A linha do tempo usa a mesma escala nos dois lados, então dá para ver a diferença de tempo.
 
-As ferramentas simulam APIs externas (voos, hotéis, eventos, restaurantes): elas esperam de 2 a 3,5 s e devolvem dados fictícios. É essa espera que a paralelização elimina. Para usar APIs reais, troque as funções `search_*` em `api/index.py`.
+## Fontes de dados (APIs de terceiros)
+
+Cada ferramenta consulta uma API real quando a chave dela está configurada no servidor:
+
+| Tarefa | API | Variável de ambiente | Observações |
+|---|---|---|---|
+| Voos | [SerpApi · Google Flights](https://serpapi.com/google-flights-api) | `SERPAPI_API_KEY` | O agente converte as cidades em códigos IATA. Mostra os horários do voo de ida e o preço total ida e volta (1 adulto). |
+| Hotéis | [SerpApi · Google Hotels](https://serpapi.com/google-hotels-api) | `SERPAPI_API_KEY` | Mesma chave dos voos. Diária e preço total da estadia (1 adulto). |
+| Eventos | [Ticketmaster Discovery](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/) | `TICKETMASTER_API_KEY` | Busca num raio de 30 km das coordenadas da cidade. A cobertura varia muito por país. |
+| Restaurantes | [Yelp Fusion](https://docs.developer.yelp.com/reference/v3_business_search) | `YELP_API_KEY` | Paga, com teste de 30 dias. A cobertura fora dos EUA/Europa é limitada. |
+
+A Amadeus Self-Service (sugestão original para voos) foi desativada em julho de 2026, por isso os voos usam a SerpApi. Os hotéis iam usar a Booking.com via RapidAPI, mas o cadastro no RapidAPI estava falhando, então também usam a SerpApi (Google Hotels). Cada busca de voos ou hotéis consome 1 busca da cota da SerpApi.
+
+**Fallback:** sem a chave, ou se a API falhar ou devolver um formato inesperado, a ferramenta usa dados simulados (com 2 a 3,5 s de espera) e inclui um `aviso`. O agente informa que os dados são simulados, e a tela mostra a fonte de cada tarefa (`GET /api/sources`). As chaves nunca são devolvidas ao navegador nem aparecem nas mensagens de erro.
 
 ## Código principal (`api/index.py`)
 
@@ -51,6 +64,8 @@ A chave:
 
 ```bash
 uv venv && uv pip install -r requirements.txt uvicorn
+cp .env.example .env                    # preencha as chaves que tiver
+set -a && source .env && set +a
 .venv/bin/python api/index.py          # http://localhost:8000  (PORT=8787 para outra porta)
 ```
 
@@ -62,4 +77,4 @@ vercel        # ou importe o repositório no painel da Vercel
 
 - `public/index.html` é servido como estático.
 - `api/index.py` (FastAPI) roda como função Python. A Vercel detecta o FastAPI e encaminha para ele as rotas que não são estáticas, com o caminho original (não use `rewrites` para `/api/index`: o app passaria a receber esse caminho e responderia 404). O `vercel.json` só define `maxDuration: 120`.
-- Não é preciso configurar nenhuma variável de ambiente.
+- As chaves das APIs de terceiros ficam em **Settings → Environment Variables** do projeto na Vercel (as mesmas do `.env.example`). Depois de adicionar, faça um novo deploy. As que faltarem usam dados simulados.

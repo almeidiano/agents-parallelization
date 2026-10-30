@@ -13,10 +13,11 @@ Provedores suportados: OpenAI e Groq. A chave vem do navegador em cada requisiç
 import asyncio
 import hashlib
 import json
+import os
 import random
 import time
 from datetime import date, timedelta
-from typing import AsyncIterator, Literal
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 from agno.agent import Agent
 from agno.models.base import Model
@@ -28,6 +29,7 @@ from agno.workflow.types import StepInput, StepOutput
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 import groq
+import httpx
 import openai
 from pydantic import BaseModel, Field
 
@@ -57,12 +59,350 @@ TASKS = [
 
 
 # ---------------------------------------------------------------------------
-# Ferramentas (APIs externas simuladas)
+# Ferramentas: APIs de terceiros
 #
-# Cada ferramenta espera alguns segundos para imitar a latência de uma API real
-# (companhias aéreas, booking, agenda cultural...). É justamente essa espera
-# que a paralelização "esconde".
+# Cada tarefa usa uma API real quando a chave dela está configurada no servidor
+# (variáveis de ambiente). Sem chave, ou se a API falhar, a ferramenta devolve
+# dados simulados com um "aviso", para a demonstração nunca travar.
 # ---------------------------------------------------------------------------
+
+# tarefa -> (nome da fonte, variável de ambiente com a chave)
+SOURCES = {
+    "voos": ("SerpApi · Google Flights", "SERPAPI_API_KEY"),
+    "hoteis": ("SerpApi · Google Hotels", "SERPAPI_API_KEY"),
+    "eventos": ("Ticketmaster Discovery", "TICKETMASTER_API_KEY"),
+    "restaurantes": ("Yelp Fusion", "YELP_API_KEY"),
+}
+
+HTTP_TIMEOUT = 20
+
+
+class ExternalAPIError(Exception):
+    pass
+
+
+async def _get_json(url: str, *, params: dict | None = None, headers: dict | None = None) -> Any:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        try:
+            response = await client.get(url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            # Sem a URL na mensagem: ela pode conter a chave da API (query string)
+            raise ExternalAPIError(type(exc).__name__) from None
+    if response.status_code >= 400:
+        raise ExternalAPIError(f"HTTP {response.status_code}")
+    return response.json()
+
+
+async def _with_fallback(
+    task: str, real: Callable[[str], Awaitable[dict]], mock: Callable[[], Awaitable[dict]]
+) -> str:
+    source, env_var = SOURCES[task]
+    api_key = os.getenv(env_var)
+    if api_key:
+        try:
+            return json.dumps({"fonte": source, **await real(api_key)}, ensure_ascii=False)
+        except ExternalAPIError as exc:
+            warning = f"{source} falhou ({exc}); dados simulados."
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+            warning = f"{source} devolveu uma resposta em formato inesperado; dados simulados."
+    else:
+        warning = f"{env_var} não configurada; dados simulados."
+    return json.dumps({"fonte": "simulada", "aviso": warning, **await mock()}, ensure_ascii=False)
+
+
+def _geohash(lat: float, lon: float, precision: int = 7) -> str:
+    """Codifica coordenadas em geohash (formato do parâmetro geoPoint da Ticketmaster)."""
+    alphabet = "0123456789bcdefghjkmnpqrstuvwxyz"
+    lat_range, lon_range = [-90.0, 90.0], [-180.0, 180.0]
+    out, bits, n_bits, use_lon = "", 0, 0, True
+    while len(out) < precision:
+        rng, value = (lon_range, lon) if use_lon else (lat_range, lat)
+        mid = (rng[0] + rng[1]) / 2
+        bits = bits * 2 + (value > mid)
+        rng[0 if value > mid else 1] = mid
+        use_lon, n_bits = not use_lon, n_bits + 1
+        if n_bits == 5:
+            out, bits, n_bits = out + alphabet[bits], 0, 0
+    return out
+
+
+async def search_flights(origin_airport: str, destination_airport: str, depart_date: str, return_date: str) -> str:
+    """Busca preços de voos de ida e volta entre dois aeroportos.
+
+    Args:
+        origin_airport: Código IATA do aeroporto de origem (ex.: GRU).
+        destination_airport: Código IATA do aeroporto de destino (ex.: LIS).
+        depart_date: Data de ida (AAAA-MM-DD).
+        return_date: Data de volta (AAAA-MM-DD).
+    """
+
+    async def real(api_key: str) -> dict:
+        data = await _get_json(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_flights",
+                "departure_id": origin_airport.upper(),
+                "arrival_id": destination_airport.upper(),
+                "outbound_date": depart_date,
+                "return_date": return_date,
+                "type": 1,
+                "currency": "BRL",
+                "hl": "pt",
+                "gl": "br",
+                "api_key": api_key,
+            },
+        )
+        if data.get("error"):
+            raise ExternalAPIError(data["error"])
+        options = (data.get("best_flights") or []) + (data.get("other_flights") or [])
+        flights = []
+        for option in options[:6]:
+            legs = option.get("flights") or [{}]
+            flights.append(
+                {
+                    "companhias": sorted({leg.get("airline", "?") for leg in legs}),
+                    "saida": legs[0].get("departure_airport", {}).get("time"),
+                    "chegada": legs[-1].get("arrival_airport", {}).get("time"),
+                    "escalas": len(option.get("layovers") or []),
+                    "duracao_horas": round((option.get("total_duration") or 0) / 60, 1),
+                    "preco_ida_e_volta_brl": option.get("price"),
+                }
+            )
+        return {
+            "observacao": "Horários do voo de ida; o preço é da viagem de ida e volta, 1 adulto.",
+            "voos": flights,
+        }
+
+    async def mock() -> dict:
+        rng = _rng("voos", origin_airport, destination_airport, depart_date)
+        await _latency(rng)
+        airlines = ["LATAM", "GOL", "Azul", "TAP", "Air France", "Iberia", "American Airlines", "KLM"]
+        flights = []
+        for airline in rng.sample(airlines, 4):
+            stops = rng.choice([0, 0, 1, 1, 2])
+            flights.append(
+                {
+                    "companhias": [airline],
+                    "saida": f"{depart_date} {rng.randint(5, 22):02d}:{rng.choice(['00', '15', '30', '45'])}",
+                    "escalas": stops,
+                    "duracao_horas": round(rng.uniform(1.5, 14) + stops * 2.5, 1),
+                    "preco_ida_e_volta_brl": rng.randrange(900, 7500, 10) - stops * 300,
+                }
+            )
+        return {"voos": flights}
+
+    return await _with_fallback("voos", real, mock)
+
+
+async def search_hotels(destination: str, checkin: str, checkout: str) -> str:
+    """Busca hotéis com disponibilidade no destino para o período.
+
+    Args:
+        destination: Cidade de destino.
+        checkin: Data de check-in (AAAA-MM-DD).
+        checkout: Data de check-out (AAAA-MM-DD).
+    """
+
+    async def real(api_key: str) -> dict:
+        data = await _get_json(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_hotels",
+                "q": f"hotéis em {destination}",
+                "check_in_date": checkin,
+                "check_out_date": checkout,
+                "adults": 1,
+                "currency": "BRL",
+                "hl": "pt",
+                "gl": "br",
+                "api_key": api_key,
+            },
+        )
+        if data.get("error"):
+            raise ExternalAPIError(data["error"])
+        hotels = []
+        for prop in (data.get("properties") or [])[:8]:
+            total = prop.get("total_rate") or {}
+            nightly = prop.get("rate_per_night") or {}
+            hotels.append(
+                {
+                    "nome": prop.get("name"),
+                    "tipo": prop.get("type"),
+                    "estrelas": prop.get("extracted_hotel_class") or prop.get("hotel_class"),
+                    "nota_hospedes_0a5": prop.get("overall_rating"),
+                    "num_avaliacoes": prop.get("reviews"),
+                    "diaria_brl": nightly.get("extracted_lowest"),
+                    "preco_total_estadia_brl": total.get("extracted_lowest"),
+                    "comodidades": (prop.get("amenities") or [])[:5],
+                }
+            )
+        return {
+            "destino": destination,
+            "observacao": "Preços para 1 adulto, com disponibilidade nas datas informadas.",
+            "hoteis": hotels,
+        }
+
+    async def mock() -> dict:
+        rng = _rng("hoteis", destination, checkin)
+        await _latency(rng)
+        prefixes = ["Grand", "Boutique", "Hostel", "Residence", "Palace", "Urban", "Garden", "Central"]
+        nights = _nights(checkin, checkout)
+        hotels = []
+        for prefix in rng.sample(prefixes, 5):
+            hotels.append(
+                {
+                    "nome": f"{prefix} {destination}",
+                    "estrelas": rng.randint(2, 5),
+                    "nota_hospedes": round(rng.uniform(7.0, 9.8), 1),
+                    "preco_total_estadia": rng.randrange(180, 1800, 10) * nights,
+                    "moeda": "BRL",
+                }
+            )
+        return {"destino": destination, "hoteis": hotels}
+
+    return await _with_fallback("hoteis", real, mock)
+
+
+async def search_events(city: str, latitude: float, longitude: float, start_date: str, end_date: str) -> str:
+    """Procura eventos locais (shows, esportes, teatro, festivais) num raio de 30 km da cidade.
+
+    Args:
+        city: Nome da cidade.
+        latitude: Latitude do centro da cidade.
+        longitude: Longitude do centro da cidade.
+        start_date: Primeiro dia da viagem (AAAA-MM-DD).
+        end_date: Último dia da viagem (AAAA-MM-DD).
+    """
+
+    async def real(api_key: str) -> dict:
+        data = await _get_json(
+            "https://app.ticketmaster.com/discovery/v2/events.json",
+            params={
+                "apikey": api_key,
+                "geoPoint": _geohash(latitude, longitude),
+                "radius": 30,
+                "unit": "km",
+                "startDateTime": f"{start_date}T00:00:00Z",
+                "endDateTime": f"{end_date}T23:59:59Z",
+                "sort": "date,asc",
+                "size": 10,
+            },
+        )
+        events = []
+        for event in (data.get("_embedded") or {}).get("events") or []:
+            start = (event.get("dates") or {}).get("start") or {}
+            category = (event.get("classifications") or [{}])[0]
+            venue = ((event.get("_embedded") or {}).get("venues") or [{}])[0]
+            price = (event.get("priceRanges") or [{}])[0]
+            events.append(
+                {
+                    "evento": event.get("name"),
+                    "data": start.get("localDate"),
+                    "hora": start.get("localTime"),
+                    "categoria": (category.get("segment") or {}).get("name"),
+                    "genero": (category.get("genre") or {}).get("name"),
+                    "local": venue.get("name"),
+                    "preco": f"{price['min']}–{price.get('max', price['min'])} {price.get('currency', '')}".strip()
+                    if price.get("min") is not None
+                    else None,
+                }
+            )
+        result: dict = {"cidade": city, "eventos": events}
+        if not events:
+            result["observacao"] = "Nenhum evento no Ticketmaster para o período (a cobertura varia por país)."
+        return result
+
+    async def mock() -> dict:
+        rng = _rng("eventos", city, start_date)
+        await _latency(rng)
+        try:
+            start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        except ValueError:
+            start, end = date.today(), date.today() + timedelta(days=5)
+        span = max((end - start).days, 0)
+        kinds = [
+            ("Festival gastronômico de rua", "gastronomia"),
+            ("Show de jazz ao ar livre", "música"),
+            ("Exposição de arte contemporânea", "arte"),
+            ("Feira de artesanato local", "cultura"),
+            ("Tour noturno guiado pelo centro", "passeio"),
+            ("Partida de futebol no estádio local", "esporte"),
+            ("Peça de teatro em cartaz", "teatro"),
+        ]
+        events = []
+        for name, category in rng.sample(kinds, 4):
+            events.append(
+                {
+                    "evento": name,
+                    "categoria": category,
+                    "data": (start + timedelta(days=rng.randint(0, span))).isoformat(),
+                    "preco": f"{rng.choice([0, 0, 40, 80, 150, 250])} BRL",
+                }
+            )
+        return {"cidade": city, "eventos": events}
+
+    return await _with_fallback("eventos", real, mock)
+
+
+async def search_restaurants(location: str, term: str = "restaurants") -> str:
+    """Busca restaurantes bem avaliados no destino.
+
+    Args:
+        location: Cidade e país (ex.: "Lisboa, Portugal").
+        term: Palavras-chave em inglês sobre o tipo de comida (ex.: "seafood", "vegetarian", "local food").
+    """
+
+    async def real(api_key: str) -> dict:
+        data = await _get_json(
+            "https://api.yelp.com/v3/businesses/search",
+            params={"location": location, "term": term or "restaurants", "categories": "restaurants", "limit": 8},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        restaurants = []
+        for business in data.get("businesses") or []:
+            address = (business.get("location") or {}).get("display_address") or []
+            restaurants.append(
+                {
+                    "nome": business.get("name"),
+                    "estilo": ", ".join(c.get("title", "") for c in business.get("categories") or []),
+                    "faixa_preco": business.get("price"),
+                    "nota": business.get("rating"),
+                    "num_avaliacoes": business.get("review_count"),
+                    "endereco": ", ".join(address) or business.get("formatted_address"),
+                }
+            )
+        return {"local": location, "restaurantes": restaurants}
+
+    async def mock() -> dict:
+        rng = _rng("restaurantes", location, term)
+        await _latency(rng)
+        styles = [
+            ("Cozinha típica regional", "$$"),
+            ("Frutos do mar", "$$$"),
+            ("Bistrô contemporâneo", "$$$"),
+            ("Vegetariano e vegano", "$$"),
+            ("Mercado de comida de rua", "$"),
+            ("Alta gastronomia (menu degustação)", "$$$$"),
+            ("Café e padaria artesanal", "$"),
+        ]
+        city = location.split(",")[0].strip()
+        restaurants = []
+        for i, (style, price) in enumerate(rng.sample(styles, 5)):
+            restaurants.append(
+                {
+                    "nome": f"Restaurante {city} #{i + 1}",
+                    "estilo": style,
+                    "faixa_preco": price,
+                    "nota": round(rng.uniform(4.0, 4.9), 1),
+                }
+            )
+        return {"local": location, "restaurantes": restaurants}
+
+    return await _with_fallback("restaurantes", real, mock)
+
+
+# Dados simulados (fallback): esperam alguns segundos para imitar a latência de
+# uma API real, e são sempre os mesmos para a mesma entrada.
 
 
 def _rng(*parts: str) -> random.Random:
@@ -74,127 +414,11 @@ async def _latency(rng: random.Random) -> None:
     await asyncio.sleep(rng.uniform(2.0, 3.5))
 
 
-async def search_flights(origin: str, destination: str, depart_date: str, return_date: str) -> str:
-    """Busca preços de voos de ida e volta entre duas cidades.
-
-    Args:
-        origin: Cidade de origem.
-        destination: Cidade de destino.
-        depart_date: Data de ida (AAAA-MM-DD).
-        return_date: Data de volta (AAAA-MM-DD).
-    """
-    rng = _rng("voos", origin, destination, depart_date)
-    await _latency(rng)
-    airlines = ["LATAM", "GOL", "Azul", "TAP", "Air France", "Iberia", "American Airlines", "KLM"]
-    flights = []
-    for airline in rng.sample(airlines, 4):
-        stops = rng.choice([0, 0, 1, 1, 2])
-        flights.append(
-            {
-                "companhia": airline,
-                "ida": f"{depart_date} {rng.randint(5, 22):02d}:{rng.choice(['00', '15', '30', '45'])}",
-                "volta": f"{return_date} {rng.randint(5, 22):02d}:{rng.choice(['00', '15', '30', '45'])}",
-                "escalas": stops,
-                "duracao_horas": round(rng.uniform(1.5, 14) + stops * 2.5, 1),
-                "preco_brl": rng.randrange(900, 7500, 10) - stops * 300,
-            }
-        )
-    return json.dumps({"origem": origin, "destino": destination, "voos": flights}, ensure_ascii=False)
-
-
-async def search_hotels(destination: str, checkin: str, checkout: str) -> str:
-    """Busca hotéis com disponibilidade no destino para o período.
-
-    Args:
-        destination: Cidade de destino.
-        checkin: Data de check-in (AAAA-MM-DD).
-        checkout: Data de check-out (AAAA-MM-DD).
-    """
-    rng = _rng("hoteis", destination, checkin)
-    await _latency(rng)
-    prefixes = ["Grand", "Boutique", "Hostel", "Residence", "Palace", "Urban", "Garden", "Central"]
-    areas = ["Centro histórico", "Beira-mar", "Bairro boêmio", "Distrito financeiro", "Perto do aeroporto"]
-    hotels = []
-    for prefix in rng.sample(prefixes, 5):
-        hotels.append(
-            {
-                "nome": f"{prefix} {destination}",
-                "regiao": rng.choice(areas),
-                "estrelas": rng.randint(2, 5),
-                "nota_hospedes": round(rng.uniform(7.0, 9.8), 1),
-                "diaria_brl": rng.randrange(180, 1800, 10),
-                "quartos_disponiveis": rng.randint(0, 12),
-            }
-        )
-    return json.dumps({"destino": destination, "hoteis": hotels}, ensure_ascii=False)
-
-
-async def search_events(destination: str, start_date: str, end_date: str) -> str:
-    """Procura eventos locais (shows, exposições, festivais) no período da viagem.
-
-    Args:
-        destination: Cidade de destino.
-        start_date: Primeiro dia da viagem (AAAA-MM-DD).
-        end_date: Último dia da viagem (AAAA-MM-DD).
-    """
-    rng = _rng("eventos", destination, start_date)
-    await _latency(rng)
+def _nights(checkin: str, checkout: str) -> int:
     try:
-        start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        return max((date.fromisoformat(checkout) - date.fromisoformat(checkin)).days, 1)
     except ValueError:
-        start, end = date.today(), date.today() + timedelta(days=5)
-    span = max((end - start).days, 0)
-    kinds = [
-        ("Festival gastronômico de rua", "gastronomia"),
-        ("Show de jazz ao ar livre", "música"),
-        ("Exposição de arte contemporânea", "arte"),
-        ("Feira de artesanato local", "cultura"),
-        ("Tour noturno guiado pelo centro", "passeio"),
-        ("Partida de futebol no estádio local", "esporte"),
-        ("Peça de teatro em cartaz", "teatro"),
-    ]
-    events = []
-    for name, category in rng.sample(kinds, 4):
-        events.append(
-            {
-                "evento": name,
-                "categoria": category,
-                "data": (start + timedelta(days=rng.randint(0, span))).isoformat(),
-                "preco_brl": rng.choice([0, 0, 40, 80, 150, 250]),
-            }
-        )
-    return json.dumps({"destino": destination, "eventos": events}, ensure_ascii=False)
-
-
-async def search_restaurants(destination: str, interests: str) -> str:
-    """Busca restaurantes bem avaliados no destino.
-
-    Args:
-        destination: Cidade de destino.
-        interests: Preferências do viajante (ex.: comida local, vegetariano).
-    """
-    rng = _rng("restaurantes", destination, interests)
-    await _latency(rng)
-    styles = [
-        ("Cozinha típica regional", "$$"),
-        ("Frutos do mar", "$$$"),
-        ("Bistrô contemporâneo", "$$$"),
-        ("Vegetariano e vegano", "$$"),
-        ("Mercado de comida de rua", "$"),
-        ("Alta gastronomia (menu degustação)", "$$$$"),
-        ("Café e padaria artesanal", "$"),
-    ]
-    restaurants = []
-    for i, (style, price) in enumerate(rng.sample(styles, 5)):
-        restaurants.append(
-            {
-                "nome": f"Restaurante {destination} #{i + 1}",
-                "estilo": style,
-                "faixa_preco": price,
-                "nota": round(rng.uniform(4.0, 4.9), 1),
-            }
-        )
-    return json.dumps({"destino": destination, "restaurantes": restaurants}, ensure_ascii=False)
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +427,8 @@ async def search_restaurants(destination: str, interests: str) -> str:
 
 COMMON = [
     "Responda em português do Brasil, em markdown, de forma objetiva (no máximo ~120 palavras).",
-    "Use SEMPRE a ferramenta disponível antes de responder; não invente preços.",
+    "Use SEMPRE a ferramenta disponível antes de responder; não invente preços, nomes ou datas.",
+    "Termine com uma linha 'Fonte: <campo fonte>'. Se a ferramenta devolver 'aviso', diga que os dados são simulados.",
 ]
 
 
@@ -219,12 +444,14 @@ class TripRequest(BaseModel):
 def task_prompts(trip: TripRequest) -> dict[str, str]:
     t = f"de {trip.origin} para {trip.destination}, de {trip.depart_date} a {trip.return_date}"
     return {
-        "voos": f"Pesquise os voos de ida e volta {t}. Destaque a opção mais barata e a mais rápida.",
+        "voos": f"Pesquise os voos de ida e volta {t} (use os códigos IATA dos aeroportos principais). "
+        "Destaque a opção mais barata e a mais rápida.",
         "hoteis": f"Pesquise hotéis disponíveis em {trip.destination} de {trip.depart_date} a {trip.return_date}. "
-        "Recomende 3 opções com bom custo-benefício (ignore os sem quartos).",
-        "eventos": f"Encontre eventos em {trip.destination} entre {trip.depart_date} e {trip.return_date}. "
+        "Recomende 3 opções com bom custo-benefício.",
+        "eventos": f"Encontre eventos em {trip.destination} entre {trip.depart_date} e {trip.return_date} "
+        "(informe as coordenadas do centro da cidade). "
         f"Interesses do viajante: {trip.interests or 'variados'}.",
-        "restaurantes": f"Recomende restaurantes em {trip.destination}. "
+        "restaurantes": f"Recomende restaurantes em {trip.destination} (informe cidade e país). "
         f"Interesses do viajante: {trip.interests or 'variados'}.",
     }
 
@@ -424,6 +651,12 @@ async def validate(x_provider: str | None = Header(default=None), x_api_key: str
         raise HTTPException(status_code=502, detail=f"Não foi possível validar a chave: {exc}")
     models = [m for m in info["models"] if m in available] or info["models"]
     return {"ok": True, "provider": creds.provider, "label": info["label"], "models": models}
+
+
+@app.get("/api/sources")
+async def sources():
+    """Quais APIs de terceiros estão configuradas (nunca devolve as chaves)."""
+    return {task: {"fonte": name, "real": bool(os.getenv(env_var))} for task, (name, env_var) in SOURCES.items()}
 
 
 @app.post("/api/run/{mode}")
