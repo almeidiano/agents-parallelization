@@ -86,6 +86,15 @@
     border: 1px solid var(--par); font-weight: 500;
   }
   #verdict strong { color: var(--par); }
+  #verdict p { margin: 0; }
+  #verdict p + p, #verdict .bd { margin-top: 10px; }
+  #verdict .muted { color: var(--muted); font-weight: 400; font-size: 14px; }
+  .bd { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; align-items: center; font-size: 13px; font-weight: 400; }
+  .bd-bar { display: flex; height: 22px; border-radius: 5px; overflow: hidden; background: var(--bg); }
+  .bd-bar span { display: flex; align-items: center; padding: 0 8px; white-space: nowrap; overflow: hidden; color: #0d1117; font-weight: 600; font-size: 12px; }
+  .bd-bar .seg-single { background: var(--single); }
+  .bd-bar .seg-par { background: var(--par); }
+  .bd-bar .seg-synth { background: var(--synth); }
 
   .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
   @media (max-width: 900px) { .columns { grid-template-columns: 1fr; } }
@@ -512,6 +521,44 @@ function render() {
 }
 requestAnimationFrame(render);
 
+// ---------------- Resumo: onde o tempo foi gasto ----------------
+// Divide o tempo de cada lado em "pesquisas" (as 4 tarefas) e "síntese".
+// Só as pesquisas podem rodar em paralelo; a síntese espera todas terminarem.
+function breakdown(st) {
+  const tasks = TASKS.map((t) => ({ ...t, ...st.steps[t.key] })).filter((t) => t.end != null);
+  const synth = st.steps.sintese;
+  const research = (Math.max(...tasks.map((t) => t.end)) - Math.min(...tasks.map((t) => t.start))) / 1000;
+  const slowest = tasks.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a));
+  return {
+    total: elapsed(st),
+    research,
+    synth: synth?.end ? (synth.end - synth.start) / 1000 : 0,
+    slowest: { label: slowest.label, secs: (slowest.end - slowest.start) / 1000 },
+  };
+}
+
+function renderBreakdown(s, p) {
+  const bs = breakdown(s), bp = breakdown(p);
+  const f = (x) => `${x.toFixed(1)}s`;
+  const scale = Math.max(bs.total, bp.total);
+  const bar = (b, cls) => `
+    <div class="bd-bar">
+      <span class="${cls}" style="width:${(b.research / scale) * 100}%">pesquisas ${f(b.research)}</span>
+      <span class="seg-synth" style="width:${(b.synth / scale) * 100}%">síntese ${f(b.synth)}</span>
+    </div>`;
+  return `
+    <p>Plano completo com <strong>Parallelization em ${f(bp.total)}</strong> contra ${f(bs.total)} do agente único:
+      <strong>${(bs.total / bp.total).toFixed(1)}× mais rápido</strong> (${f(bs.total - bp.total)} economizados).</p>
+    <div class="bd">
+      <span>Agente único</span>${bar(bs, "seg-single")}
+      <span>Parallelization</span>${bar(bp, "seg-par")}
+    </div>
+    <p class="muted">As pesquisas caíram de ${f(bs.research)} (uma depois da outra) para ${f(bp.research)}: no paralelo, elas levam
+      o tempo da mais lenta (${bp.slowest.label}, ${f(bp.slowest.secs)}). A síntese (${f(bp.synth)}) não pode ser paralelizada:
+      o Planejador só começa quando todas as pesquisas terminam, e costuma demorar porque escreve o texto mais longo (o plano).
+      O ganho máximo vem só da parte das pesquisas.</p>`;
+}
+
 // ---------------- Execução ----------------
 document.getElementById("trip").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -526,8 +573,7 @@ document.getElementById("trip").addEventListener("submit", async (e) => {
 
   const s = cols.single.state, p = cols.parallel.state;
   if (!s.error && !p.error) {
-    const ts = elapsed(s), tp = elapsed(p);
-    verdict.innerHTML = `Plano completo com <strong>Parallelization em ${tp.toFixed(1)}s</strong> contra ${ts.toFixed(1)}s do agente único: <strong>${(ts / tp).toFixed(1)}× mais rápido</strong>. As tarefas são independentes, então rodar ao mesmo tempo elimina a espera de uma pela outra.`;
+    verdict.innerHTML = renderBreakdown(s, p);
     verdict.classList.remove("hidden");
   }
   btn.disabled = false; btn.textContent = "Planejar e comparar";
