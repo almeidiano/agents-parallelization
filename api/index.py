@@ -69,7 +69,7 @@ TASKS = [
 # tarefa -> (nome da fonte, variável de ambiente com a chave)
 SOURCES = {
     "voos": ("SerpApi · Google Flights", "SERPAPI_API_KEY"),
-    "hoteis": ("Booking.com · RapidAPI", "RAPIDAPI_KEY"),
+    "hoteis": ("SerpApi · Google Hotels", "SERPAPI_API_KEY"),
     "eventos": ("Ticketmaster Discovery", "TICKETMASTER_API_KEY"),
     "restaurantes": ("Yelp Fusion", "YELP_API_KEY"),
 }
@@ -202,51 +202,43 @@ async def search_hotels(destination: str, checkin: str, checkout: str) -> str:
         checkin: Data de check-in (AAAA-MM-DD).
         checkout: Data de check-out (AAAA-MM-DD).
     """
-    base_url = "https://booking-com15.p.rapidapi.com/api/v1/hotels"
 
     async def real(api_key: str) -> dict:
-        headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "booking-com15.p.rapidapi.com"}
-        found = await _get_json(f"{base_url}/searchDestination", params={"query": destination}, headers=headers)
-        places = found.get("data") or []
-        if not places:
-            raise ExternalAPIError(found.get("message") or "destino não encontrado")
-        place = places[0]
-        result = await _get_json(
-            f"{base_url}/searchHotels",
+        data = await _get_json(
+            "https://serpapi.com/search.json",
             params={
-                "dest_id": place["dest_id"],
-                "search_type": str(place.get("search_type", "city")).upper(),
-                "arrival_date": checkin,
-                "departure_date": checkout,
+                "engine": "google_hotels",
+                "q": f"hotéis em {destination}",
+                "check_in_date": checkin,
+                "check_out_date": checkout,
                 "adults": 1,
-                "room_qty": 1,
-                "page_number": 1,
-                "units": "metric",
-                "languagecode": "pt-br",
-                "currency_code": "BRL",
+                "currency": "BRL",
+                "hl": "pt",
+                "gl": "br",
+                "api_key": api_key,
             },
-            headers=headers,
         )
-        if result.get("status") is False:
-            raise ExternalAPIError(str(result.get("message") or "busca recusada"))
+        if data.get("error"):
+            raise ExternalAPIError(data["error"])
         hotels = []
-        for item in ((result.get("data") or {}).get("hotels") or [])[:8]:
-            prop = item.get("property") or {}
-            price = (prop.get("priceBreakdown") or {}).get("grossPrice") or {}
+        for prop in (data.get("properties") or [])[:8]:
+            total = prop.get("total_rate") or {}
+            nightly = prop.get("rate_per_night") or {}
             hotels.append(
                 {
                     "nome": prop.get("name"),
-                    "estrelas": prop.get("accuratePropertyClass") or prop.get("propertyClass"),
-                    "nota_hospedes": prop.get("reviewScore"),
-                    "avaliacao": prop.get("reviewScoreWord"),
-                    "num_avaliacoes": prop.get("reviewCount"),
-                    "preco_total_estadia": round(price["value"]) if price.get("value") else None,
-                    "moeda": price.get("currency"),
+                    "tipo": prop.get("type"),
+                    "estrelas": prop.get("extracted_hotel_class") or prop.get("hotel_class"),
+                    "nota_hospedes_0a5": prop.get("overall_rating"),
+                    "num_avaliacoes": prop.get("reviews"),
+                    "diaria_brl": nightly.get("extracted_lowest"),
+                    "preco_total_estadia_brl": total.get("extracted_lowest"),
+                    "comodidades": (prop.get("amenities") or [])[:5],
                 }
             )
         return {
-            "destino": place.get("label") or destination,
-            "observacao": "Preço total da estadia para 1 adulto; só aparecem hotéis com disponibilidade.",
+            "destino": destination,
+            "observacao": "Preços para 1 adulto, com disponibilidade nas datas informadas.",
             "hoteis": hotels,
         }
 

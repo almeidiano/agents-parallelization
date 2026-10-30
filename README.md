@@ -23,11 +23,11 @@ Cada ferramenta consulta uma API real quando a chave dela está configurada no s
 | Tarefa | API | Variável de ambiente | Observações |
 |---|---|---|---|
 | Voos | [SerpApi · Google Flights](https://serpapi.com/google-flights-api) | `SERPAPI_API_KEY` | O agente converte as cidades em códigos IATA. Mostra os horários do voo de ida e o preço total ida e volta (1 adulto). |
-| Hotéis | [Booking.com via RapidAPI (DataCrawler)](https://rapidapi.com/DataCrawler/api/booking-com15) | `RAPIDAPI_KEY` | API não oficial. Faz 2 chamadas: `searchDestination` e depois `searchHotels`. |
+| Hotéis | [SerpApi · Google Hotels](https://serpapi.com/google-hotels-api) | `SERPAPI_API_KEY` | Mesma chave dos voos. Diária e preço total da estadia (1 adulto). |
 | Eventos | [Ticketmaster Discovery](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/) | `TICKETMASTER_API_KEY` | Busca num raio de 30 km das coordenadas da cidade. A cobertura varia muito por país. |
 | Restaurantes | [Yelp Fusion](https://docs.developer.yelp.com/reference/v3_business_search) | `YELP_API_KEY` | Paga, com teste de 30 dias. A cobertura fora dos EUA/Europa é limitada. |
 
-A Amadeus Self-Service (sugestão original para voos) foi desativada em julho de 2026, por isso os voos usam a SerpApi.
+A Amadeus Self-Service (sugestão original para voos) foi desativada em julho de 2026, por isso os voos usam a SerpApi. Os hotéis iam usar a Booking.com via RapidAPI, mas o cadastro no RapidAPI estava falhando, então também usam a SerpApi (Google Hotels). Cada busca de voos ou hotéis consome 1 busca da cota da SerpApi.
 
 **Fallback:** sem a chave, ou se a API falhar ou devolver um formato inesperado, a ferramenta usa dados simulados (com 2 a 3,5 s de espera) e inclui um `aviso`. O agente informa que os dados são simulados, e a tela mostra a fonte de cada tarefa (`GET /api/sources`). As chaves nunca são devolvidas ao navegador nem aparecem nas mensagens de erro.
 
