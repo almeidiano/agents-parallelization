@@ -51,8 +51,9 @@ A interface só é liberada depois que a pessoa escolhe o provedor e informa uma
 |---|---|---|
 | OpenAI | `sk-...` | gpt-4.1-mini, gpt-4.1-nano, gpt-4o-mini, gpt-4.1, gpt-4o |
 | [Groq](https://console.groq.com/keys) | `gsk_...` | openai/gpt-oss-120b, openai/gpt-oss-20b, llama-3.3-70b-versatile, llama-3.1-8b-instant |
+| [Anthropic](https://platform.claude.com/settings/keys) | `sk-ant-...` | claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5 |
 
-Os modelos ficam em `PROVIDERS` no `api/index.py`; a tela mostra só os que a chave tem acesso. No Agno, a troca de provedor é só a classe do modelo: `OpenAIChat` ou `Groq`.
+Os modelos ficam em `PROVIDERS` no `api/index.py`; a tela mostra só os que a chave tem acesso. No Agno, a troca de provedor é só a classe do modelo: `OpenAIChat`, `Groq` ou `Claude`.
 
 A chave:
 

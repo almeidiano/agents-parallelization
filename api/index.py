@@ -6,7 +6,7 @@ Caso de uso: um agente que planeja viagens.
   - Parallelization: 4 subagentes especialistas executam as tarefas AO MESMO TEMPO
     (agno.workflow.Parallel) e um agente planejador junta tudo no final.
 
-Provedores suportados: OpenAI e Groq. A chave vem do navegador em cada requisição
+Provedores suportados: OpenAI, Groq e Anthropic. A chave vem do navegador em cada requisição
 (headers X-Provider e X-Api-Key) e nunca é armazenada no servidor.
 """
 
@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 from agno.agent import Agent
+from agno.models.anthropic import Claude
 from agno.models.base import Model
 from agno.models.groq import Groq
 from agno.models.openai import OpenAIChat
@@ -28,6 +29,7 @@ from agno.workflow import Parallel, Step, Workflow
 from agno.workflow.types import StepInput, StepOutput
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
+import anthropic
 import groq
 import httpx
 import openai
@@ -46,6 +48,11 @@ PROVIDERS = {
         "label": "Groq",
         "key_prefix": "gsk_",
         "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    },
+    "anthropic": {
+        "label": "Anthropic",
+        "key_prefix": "sk-ant-",
+        "models": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
     },
 }
 
@@ -457,13 +464,15 @@ def task_prompts(trip: TripRequest) -> dict[str, str]:
 
 
 class Credentials(BaseModel):
-    provider: Literal["openai", "groq"]
+    provider: Literal["openai", "groq", "anthropic"]
     api_key: str
 
 
 def model_for(trip: TripRequest, creds: Credentials) -> Model:
     if creds.provider == "groq":
         return Groq(id=trip.model, api_key=creds.api_key)
+    if creds.provider == "anthropic":
+        return Claude(id=trip.model, api_key=creds.api_key)
     return OpenAIChat(id=trip.model, api_key=creds.api_key)
 
 
@@ -642,10 +651,14 @@ async def validate(x_provider: str | None = Header(default=None), x_api_key: str
     """Confere a chave listando os modelos da conta; devolve os modelos da demo que ela pode usar."""
     creds = require_creds(x_provider, x_api_key)
     info = PROVIDERS[creds.provider]
-    client = groq.AsyncGroq if creds.provider == "groq" else openai.AsyncOpenAI
     try:
-        available = {m.id for m in (await client(api_key=creds.api_key).models.list()).data}
-    except (openai.AuthenticationError, groq.AuthenticationError):
+        if creds.provider == "anthropic":
+            # models.list() da Anthropic é paginado: percorre todas as páginas
+            available = {m.id async for m in anthropic.AsyncAnthropic(api_key=creds.api_key).models.list()}
+        else:
+            client = groq.AsyncGroq if creds.provider == "groq" else openai.AsyncOpenAI
+            available = {m.id for m in (await client(api_key=creds.api_key).models.list()).data}
+    except (openai.AuthenticationError, groq.AuthenticationError, anthropic.AuthenticationError):
         raise HTTPException(status_code=401, detail=f"A {info['label']} recusou essa chave.")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Não foi possível validar a chave: {exc}")

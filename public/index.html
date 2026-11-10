@@ -180,6 +180,7 @@
     <div class="seg" id="provider-seg">
       <button type="button" data-provider="openai" class="active">OpenAI</button>
       <button type="button" data-provider="groq">Groq</button>
+      <button type="button" data-provider="anthropic">Anthropic</button>
     </div>
     <div class="field">
       <label for="key" id="key-label">OpenAI API key</label>
@@ -270,6 +271,7 @@ const MODES = {
 const PROVIDERS = {
   openai: { label: "OpenAI", placeholder: "sk-..." },
   groq: { label: "Groq", placeholder: "gsk_..." },
+  anthropic: { label: "Anthropic", placeholder: "sk-ant-..." },
 };
 // { provider, label, key, models } — guardado só nesta aba
 const store = {

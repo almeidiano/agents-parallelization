@@ -2,4 +2,5 @@ agno==3.1.10
 openai>=1.99
 fastapi>=0.115
 groq>=0.30
+anthropic>=2.0
 httpx>=0.27
